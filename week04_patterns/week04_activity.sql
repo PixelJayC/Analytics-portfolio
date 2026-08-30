@@ -76,7 +76,7 @@ WITH month_spine AS (
             COUNT(*) AS order_count
         FROM items i
         INNER JOIN orders o
-        ON i.order_id = o.order_id
+            ON i.order_id = o.order_id
         GROUP BY 1,2
     ),
 
@@ -116,7 +116,7 @@ WITH month_spine AS (
         COUNT(*) AS streak_count
     FROM island
     GROUP BY seller_id, island_idx
-    HAVING COUNT(*) >= 3;
+        HAVING COUNT(*) >= 3;
 
 
 -- =============================================================================
@@ -125,3 +125,152 @@ WITH month_spine AS (
 --            and cross-tabulate against review scores.
 -- =============================================================================
 
+WITH delivery_times AS (
+    SELECT
+        o.order_id,
+        DATE_DIFF('day',o.order_purchase_timestamp, o.order_delivered_customer_date) AS delivery_days,
+        r.review_score
+    FROM orders o
+    INNER JOIN reviews r
+        ON o.order_id = r.order_id
+    WHERE order_status = 'delivered'
+    ),
+
+    bucketed AS (
+        SELECT
+            order_id,
+            review_score,
+            CASE
+                WHEN delivery_days BETWEEN 0 AND 3 THEN '0-3 days'
+                WHEN delivery_days BETWEEN 4 AND 7 THEN '4-7 days'
+                WHEN delivery_days BETWEEN 8 AND 14 THEN '8-14 days'
+                WHEN delivery_days >= 15 THEN '15+ days'
+            ELSE 'unknown'
+            END AS delivery_bucket
+        FROM delivery_times
+    )
+
+SELECT
+    delivery_bucket,
+    review_score,
+    COUNT(order_id) AS order_count
+    FROM bucketed
+    GROUP BY delivery_bucket, review_score
+    ORDER BY delivery_bucket, review_score ASC;
+
+
+-- =============================================================================
+-- 4. PIVOT AND UNPIVOT (WIDE <-> LONG FORMAT)
+-- Objective: Pivot Wednesday's cross-tab result into a wide matrix, 
+--            then unpivot back to long format using LATERAL / VALUES.
+-- =============================================================================
+
+WITH delivery_times AS (
+    SELECT
+        o.order_id,
+        DATE_DIFF('day', o.order_purchase_timestamp, o.order_delivered_customer_date) AS delivery_days,
+        r.review_score
+    FROM orders o
+    INNER JOIN reviews r
+    ON o.order_id = r.order_id
+),
+
+    bucket_orders AS (
+        SELECT
+            order_id,
+            review_score,
+            CASE
+                WHEN delivery_days BETWEEN 0 AND 3 THEN '0-3 days'
+                WHEN delivery_days BETWEEN 4 AND 7 THEN '4-7 days'
+                WHEN delivery_days BETWEEN 8 AND 14 THEN '8-14 days'
+                WHEN delivery_days >= 15 THEN '15+ days'
+                ELSE 'unknown'
+                END AS delivery_bucket 
+        FROM delivery_times
+    ),
+
+    wide AS (
+        SELECT
+            delivery_bucket,
+            COUNT(*) FILTER (WHERE review_score = 1) AS score_1,
+            COUNT(*) FILTER (WHERE review_score = 2) AS score_2,
+            COUNT(*) FILTER (WHERE review_score = 3) AS score_3,
+            COUNT(*) FILTER (WHERE review_score = 4) AS score_4,
+            COUNT(*) FILTER (WHERE review_score = 5) AS score_5,
+        FROM bucket_orders
+        GROUP BY delivery_bucket
+    )
+SELECT * FROM wide
+ORDER BY delivery_bucket;
+
+--Reverse: wide -> long via UNPIVOT (should reproduce wednesday shape)
+
+WITH delivery_times AS (
+    SELECT
+        o.order_id,
+        DATE_DIFF('day', o.order_purchase_timestamp, o.order_delivered_customer_date) AS delivery_days,
+        r.review_score
+    FROM orders o
+    INNER JOIN reviews r
+    ON o.order_id = r.order_id
+),
+
+    bucket_orders AS (
+        SELECT
+            order_id,
+            review_score,
+            CASE
+                WHEN delivery_days BETWEEN 0 AND 3 THEN '0-3 days'
+                WHEN delivery_days BETWEEN 4 AND 7 THEN '4-7 days'
+                WHEN delivery_days BETWEEN 8 AND 14 THEN '8-14 days'
+                WHEN delivery_days >= 15 THEN '15+ days'
+                ELSE 'unknown'
+                END AS delivery_bucket 
+        FROM delivery_times
+    ),
+
+    wide AS (
+        SELECT
+            delivery_bucket,
+            COUNT(*) FILTER (WHERE review_score = 1) AS score_1,
+            COUNT(*) FILTER (WHERE review_score = 2) AS score_2,
+            COUNT(*) FILTER (WHERE review_score = 3) AS score_3,
+            COUNT(*) FILTER (WHERE review_score = 4) AS score_4,
+            COUNT(*) FILTER (WHERE review_score = 5) AS score_5,
+        FROM bucket_orders
+        GROUP BY delivery_bucket
+    )
+SELECT
+    delivery_bucket,
+    review_score,
+    order_count
+FROM wide
+UNPIVOT (
+    order_count FOR review_score IN (
+    score_1 AS '1',
+    score_2 AS '2',
+    score_3 AS '3',
+    score_4 AS '4',
+    score_5 AS '5'
+    )
+)
+ORDER BY delivery_bucket ASC;
+
+-- =============================================================================
+-- 5. SELF-JOINS (MARKET BASKET ANALYSIS)
+-- Grain: Product pair.
+-- Objective: Find unique product pairs frequently co-purchased in the same order.
+-- Technique: Join condition `a.product_id < b.product_id` prevents duplicate 
+--            pairs (A,B / B,A) and self-matching (A,A).
+-- =============================================================================
+
+SELECT
+    i1.product_id AS product_a,
+    i2.product_id AS product_b,
+    COUNT(DISTINCT i1.product_id) AS times_bought_together
+    FROM items i1
+    INNER JOIN items i2
+        ON i1.order_id = i2.order_id
+        AND i1.product_id < i2.product_id
+GROUP BY 1,2
+ORDER BY times_bought_together;
