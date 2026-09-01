@@ -1,0 +1,19 @@
+version: 2
+
+sources:
+  - name: olist
+    schema: main
+    tables:
+      - name: orders
+        loaded_at_field: order_purchase_timestamp
+        freshness:
+          warn_after: {count: 9999, period: day}
+          error_after: {count: 9999, period: day}
+      - name: items
+      - name: customers
+      - name: products
+      - name: sellers
+      - name: payments
+      - name: reviews
+      - name: geolocation
+      - name: category
